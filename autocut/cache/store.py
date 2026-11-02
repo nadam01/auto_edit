@@ -1,8 +1,10 @@
 """분석 결과 캐시.
 
-키 = (원본 절대경로, 크기, 수정시각) + 단계 이름 + 단계 파라미터.
-원본이 바뀌면 자동으로 새로 분석한다. 파일 단위로 저장하므로
-중간에 멈춰도 끝난 파일은 재사용된다(이어하기).
+키 = 원본 '내용' 지문(크기 + 앞/뒤 1MB 해시) + 단계 이름 + 단계 파라미터.
+경로·수정시각은 쓰지 않으므로 같은 파일을 맥(/Volumes/..)과 윈도우(E:\\..)에서
+열어도, 다른 드라이브로 복사해도 캐시가 그대로 맞는다.
+캐시 폴더를 외장 드라이브에 두면 두 컴퓨터가 분석 결과를 공유한다.
+파일 단위로 저장하므로 중간에 멈춰도 끝난 파일은 재사용된다(이어하기).
 """
 
 from __future__ import annotations
@@ -21,15 +23,28 @@ DEFAULT_CACHE_DIR = Path(os.environ.get("AUTOCUT_CACHE_DIR", Path.home() / ".aut
 
 class Cache:
     def __init__(self, root: str | Path | None = None):
-        self.root = Path(root) if root else DEFAULT_CACHE_DIR
+        self.root = Path(root).expanduser() if root else DEFAULT_CACHE_DIR
         self.root.mkdir(parents=True, exist_ok=True)
 
-    @staticmethod
-    def media_key(path: str | Path) -> str:
-        p = Path(path).resolve()
+    _key_memo: dict[tuple[str, int, int], str] = {}
+
+    @classmethod
+    def media_key(cls, path: str | Path) -> str:
+        p = Path(path)
         st = p.stat()
-        raw = f"{p}|{st.st_size}|{st.st_mtime_ns}"
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+        memo = (str(p), st.st_size, st.st_mtime_ns)
+        if memo in cls._key_memo:
+            return cls._key_memo[memo]
+        h = hashlib.sha1(f"v2|{st.st_size}|".encode())
+        chunk = 1 << 20
+        with open(p, "rb") as f:
+            h.update(f.read(chunk))
+            if st.st_size > 2 * chunk:
+                f.seek(-chunk, os.SEEK_END)
+                h.update(f.read(chunk))
+        key = h.hexdigest()[:20]
+        cls._key_memo[memo] = key
+        return key
 
     def _path(self, media_path: str | Path, stage: str, params: dict[str, Any] | None) -> Path:
         mk = self.media_key(media_path)
@@ -61,7 +76,11 @@ def probe_cached(path, cache: Cache) -> MediaInfo:
 
     hit = cache.get(path, "probe")
     if hit:
-        return MediaInfo.from_dict(hit)
+        info = MediaInfo.from_dict(hit)
+        # 캐시는 다른 OS/경로에서 만들어졌을 수 있다 -> 현재 위치로 갱신
+        st = Path(path).stat()
+        info.path, info.size, info.mtime_ns = str(Path(path).resolve()), st.st_size, st.st_mtime_ns
+        return info
     info = probe(path)
     cache.put(path, "probe", info.to_dict())
     return info

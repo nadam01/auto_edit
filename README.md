@@ -8,11 +8,23 @@
 
 필요: Python 3.11+, ffmpeg(ffprobe)가 PATH에 있어야 함.
 
+**맥**
 ```bash
-pip install -e ".[whisper,dev]"      # faster-whisper (권장 시작점)
-# 또는
-pip install -e ".[whisperx,dev]"     # 단어 경계 정밀 정렬 + 화자 분리
+brew install ffmpeg python@3.12
 ```
+```bash
+pip install -e ".[whisper,mlx,dev]"   # 애플 실리콘이면 mlx-whisper(GPU)가 자동 선택됨
+```
+
+**윈도우** (PowerShell)
+```powershell
+winget install Gyan.FFmpeg Python.Python.3.12
+```
+```powershell
+pip install -e ".[whisper,dev]"       # NVIDIA GPU면 CUDA 12 + cuDNN 9 설치 시 자동 사용
+```
+
+화자 분리가 필요하면 `.[whisperx]`도 추가(HF_TOKEN 필요).
 
 ## 사용
 
@@ -30,17 +42,53 @@ autocut cut /path/to/footage -o rough.xml --backend whisperx --diarize   # HF_TO
 
 프리미어: **파일 > 가져오기** 로 XML 선택 → 시퀀스가 생성되고 원본 파일에 그대로 연결된다.
 
+## 맥 ↔ 윈도우 번갈아 쓰기
+
+같은 외장 드라이브가 맥에서는 `/Volumes/T7`, 윈도우에서는 `E:\`로 보이므로
+**두 컴퓨터 모두** `~/.autocut/config.toml`(윈도우는 `C:\Users\이름\.autocut\config.toml`)에 같은 내용을 적는다:
+
+```toml
+[roots.t7]                 # 이름은 자유. 드라이브/NAS마다 하나씩
+mac = "/Volumes/T7"
+windows = "E:/"
+
+[roots.nas]
+mac = "/Volumes/share"
+windows = '\\nas\share'
+
+# 선택: 분석 캐시를 외장 드라이브에 두면 한쪽에서 한 음성인식을 다른 쪽이 그대로 씀
+[cache_dir]
+mac = "/Volumes/T7/.autocut_cache"
+windows = "E:/.autocut_cache"
+```
+
+- **캐시는 OS와 무관**: 파일 내용 지문으로 찾으므로 경로가 달라도 다시 분석하지 않는다.
+  음성인식 결과도 백엔드와 무관하게 재사용(맥 mlx → 윈도우 faster-whisper). 모델을 바꿔 다시 돌릴 땐 `--force-asr`.
+- **XML은 기본적으로 지금 쓰는 OS용**. 다른 OS에서 열 XML이 필요하면:
+  ```bash
+  autocut cut /Volumes/T7/촬영 -o rough.xml --target windows   # 또는 --target all → rough.mac.xml + rough.win.xml
+  ```
+- **이미 있는 XML(손으로 다듬어 프리미어에서 내보낸 것 포함) 변환**:
+  ```bash
+  autocut relink rough.mac.xml --target windows
+  ```
+  열 컴퓨터에서 `--target current`(기본)로 돌리면 실제 파일 존재까지 확인하고,
+  한글 파일명의 맥(NFD)/윈도우(NFC) 정규화 차이도 자동 보정한다. **가장 안전한 방법.**
+
 ### 주요 옵션 (`cut`)
 | 옵션 | 기본 | 설명 |
 |---|---|---|
 | `--gap` | 0.7 | 이 간격(초) 이하로 떨어진 발화는 한 컷으로 합침 |
 | `--pad-before` / `--pad-after` | 0.15 / 0.25 | 컷 앞뒤 여유 |
 | `--audio-tracks` | 2 | 오디오 채널을 몇 트랙까지 놓을지 |
-| `--model` | large-v3 | CPU면 `medium`/`small` 권장 |
-| `--device` | auto | cuda / cpu |
+| `--backend` | auto | 애플 실리콘 맥 → mlx-whisper, 그 외 → faster-whisper |
+| `--model` | large-v3 | CPU만 있으면 `medium`/`small` 권장 |
+| `--device` | auto | cuda / cpu (faster-whisper, whisperx) |
+| `--target` | current | mac / windows / all |
+| `--force-asr` | | 캐시 무시하고 음성인식 다시 |
 
-캐시: `~/.autocut/cache` (`--cache-dir` 또는 `AUTOCUT_CACHE_DIR`). 원본 경로·크기·수정시각 기준이라
-원본이 바뀌면 자동 재분석, 중단 후 재실행하면 끝난 파일은 건너뛴다. 원본 폴더에는 아무것도 쓰지 않는다.
+캐시: 기본 `~/.autocut/cache` (`--cache-dir`, `AUTOCUT_CACHE_DIR`, config.toml `cache_dir` 순으로 지정).
+중단 후 재실행하면 끝난 파일은 건너뛴다. 원본 폴더에는 아무것도 쓰지 않는다.
 
 ## 프리미어 확인 체크리스트 (smoke.xml)
 - [ ] 미디어 오프라인 없이 바로 연결되는가 (한글/공백 경로 포함)
@@ -48,6 +96,7 @@ autocut cut /path/to/footage -o rough.xml --backend whisperx --diarize   # HF_TO
 - [ ] 비디오와 A1/A2가 링크되어 함께 움직이는가
 - [ ] 클립 마커에 코멘트가 보이는가
 - [ ] 29.97 / 23.976 / 25 소스 각각에서 길이·싱크가 맞는가
+- [ ] 맥에서 만든 `--target windows` XML이 윈도우 프리미어에서 오프라인 없이 열리는가 (반대도)
 
 ## 알려진 제한 (1단계)
 - 시퀀스 fps는 첫 비디오 소스 기준. 다른 fps 소스가 섞이면 경고만 한다.
@@ -57,11 +106,12 @@ autocut cut /path/to/footage -o rough.xml --backend whisperx --diarize   # HF_TO
 ## 구조
 ```
 autocut/
-  cli.py            probe / smoke / analyze / cut  (reference / learn 예정)
+  cli.py            probe / smoke / analyze / cut / relink  (reference / learn 예정)
+  paths.py          맥↔윈도우 경로 변환, config.toml, pathurl
   models.py         MediaInfo, Transcript, Cut, Marker
   timecode.py       NTSC 레이트, 드롭프레임 TC
   ingest/probe.py   폴더 스캔 + ffprobe
-  transcribe/       faster-whisper, whisperx
+  transcribe/       faster-whisper, whisperx, mlx-whisper
   edit/simple.py    대사 구간 이어붙이기
   export/fcp7.py    xmeml v4 생성
   cache/store.py    분석 캐시

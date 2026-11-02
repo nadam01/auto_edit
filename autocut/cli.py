@@ -4,6 +4,7 @@
   autocut smoke   SRC -o smoke.xml     음성인식 없이 XML 연결 테스트 (프리미어 호환 확인용)
   autocut analyze SRC                  수집 + 음성인식 (캐시)
   autocut cut     SRC -o rough.xml     대사 구간 이어붙인 러프컷 XML
+  autocut relink  IN.xml -o OUT.xml    다른 OS용으로 원본 경로 변환 (맥 <-> 윈도우)
   autocut reference / learn            (예정: 개발 순서 5, 6단계)
 """
 
@@ -17,14 +18,21 @@ from pathlib import Path
 from autocut.cache.store import Cache, probe_cached
 from autocut.ingest.probe import ProbeError, scan
 from autocut.models import Cut, MediaInfo
+from autocut.paths import OS_NAMES, Config, current_os, load_config
 
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def _config(args) -> Config:
+    if not hasattr(args, "_cfg"):
+        args._cfg = load_config(getattr(args, "config", None))
+    return args._cfg
+
+
 def _collect(args) -> tuple[Cache, list[MediaInfo]]:
-    cache = Cache(args.cache_dir)
+    cache = Cache(args.cache_dir or _config(args).cache_dir)
     files = scan(args.src, recursive=not args.no_recursive)
     if not files:
         raise SystemExit(f"미디어 파일이 없습니다: {args.src}")
@@ -55,19 +63,51 @@ def _transcribe_all(cache: Cache, medias: list[MediaInfo], args):
     from autocut.transcribe.backends import BackendUnavailable, transcribe_cached
 
     backend = _backend(args)
+    _log(f"음성인식 백엔드: {backend.name} ({getattr(backend, 'model', '')})")
     out = {}
     targets = [m for m in medias if m.audio_channels]
     for i, m in enumerate(targets, 1):
         t0 = time.time()
         _log(f"[음성인식 {i}/{len(targets)}] {m.name} ...")
         try:
-            t = transcribe_cached(m, backend, cache)
+            t = transcribe_cached(m, backend, cache, force=args.force_asr)
         except BackendUnavailable as e:
             raise SystemExit(str(e))
         n_words = sum(len(s.words) for s in t.segments)
         _log(f"    세그먼트 {len(t.segments)}, 단어 {n_words}, {time.time() - t0:.1f}s")
         out[m.path] = t
     return out
+
+
+def _targets(args) -> list[tuple[str, Path]]:
+    """--target 에 따라 (os, 출력경로) 목록. all이면 이름.mac.xml / 이름.win.xml."""
+    out = Path(args.output)
+    t = args.target
+    if t == "current":
+        return [(current_os(), out)]
+    if t == "all":
+        return [("mac", out.with_suffix(".mac.xml")), ("windows", out.with_suffix(".win.xml"))]
+    return [(t, out)]
+
+
+def _export(cuts: list[Cut], args, **kw) -> None:
+    import warnings
+
+    from autocut.export.fcp7 import ExportOptions, write_xmeml
+
+    pm = _config(args).path_map
+    for os_name, path in _targets(args):
+        if os_name != current_os() and not pm.roots:
+            raise SystemExit(
+                f"{os_name}용 XML을 만들려면 config.toml에 [roots]를 설정하세요 "
+                f"({_config(args).source or '~/.autocut/config.toml'}). README '맥/윈도우' 참고."
+            )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            out = write_xmeml(cuts, path, ExportOptions(target_os=os_name, path_map=pm, **kw))
+        for x in w:
+            _log(f"  [경고] {x.message}")
+        _log(f"완료 ({os_name}): {out}")
 
 
 def cmd_probe(args) -> None:
@@ -77,8 +117,6 @@ def cmd_probe(args) -> None:
 def cmd_smoke(args) -> None:
     """음성인식 없이 각 파일을 3조각(앞/중간/뒤)으로 잘라 XML 생성.
     프리미어에서 경로 연결·in/out·링크·마커가 맞는지 먼저 확인하는 용도."""
-    from autocut.export.fcp7 import ExportOptions, write_xmeml
-
     _, medias = _collect(args)
     cuts: list[Cut] = []
     for m in medias:
@@ -90,8 +128,8 @@ def cmd_smoke(args) -> None:
                 label=f"{m.name} #{k + 1}",
                 reason=f"smoke test: 원본 {start:.2f}s~{start + piece:.2f}s",
             ))
-    out = write_xmeml(cuts, args.output, ExportOptions(sequence_name=args.name or "AutoCut smoke"))
-    _log(f"완료: {out}  (컷 {len(cuts)}개)")
+    _export(cuts, args, sequence_name=args.name or "AutoCut smoke")
+    _log(f"컷 {len(cuts)}개")
 
 
 def cmd_analyze(args) -> None:
@@ -102,7 +140,6 @@ def cmd_analyze(args) -> None:
 
 def cmd_cut(args) -> None:
     from autocut.edit.simple import SpeechCutOptions, speech_cuts
-    from autocut.export.fcp7 import ExportOptions, write_xmeml
 
     cache, medias = _collect(args)
     transcripts = _transcribe_all(cache, medias, args)
@@ -116,12 +153,28 @@ def cmd_cut(args) -> None:
         raise SystemExit("대사 구간을 찾지 못했습니다.")
     total = sum(c.duration for c in cuts)
     src_total = sum(m.duration for m in medias)
-    out = write_xmeml(cuts, args.output, ExportOptions(
+    _export(
+        cuts, args,
         sequence_name=args.name or Path(args.output).stem,
         max_audio_tracks=args.audio_tracks,
         clip_markers=not args.no_markers,
-    ))
-    _log(f"완료: {out}  컷 {len(cuts)}개, {total:.1f}s (원본 {src_total:.1f}s의 {total / max(src_total, 1e-9):.0%})")
+    )
+    _log(f"컷 {len(cuts)}개, {total:.1f}s (원본 {src_total:.1f}s의 {total / max(src_total, 1e-9):.0%})")
+
+
+def cmd_relink(args) -> None:
+    from autocut.export.fcp7 import relink_xml
+
+    target = current_os() if args.target == "current" else args.target
+    pm = _config(args).path_map
+    if not pm.roots:
+        raise SystemExit("config.toml에 [roots]가 없습니다. README '맥/윈도우' 참고.")
+    out = args.output or str(Path(args.input).with_suffix(f".{'win' if target == 'windows' else 'mac'}.xml"))
+    st = relink_xml(args.input, out, pm, target)
+    _log(f"완료 ({target}): {out}  경로 {st['total']}개 중 변경 {st['changed']}, "
+         f"루트 매칭 실패 {st['unmapped']}" + (f", 파일 없음 {st['missing']}" if target == current_os() else ""))
+    if st["missing"]:
+        _log("  [경고] 일부 원본을 찾지 못했습니다. 드라이브 연결과 config.toml [roots]를 확인하세요.")
 
 
 def cmd_todo(args) -> None:
@@ -136,13 +189,20 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("src", help="소스 폴더 또는 파일")
         sp.add_argument("--cache-dir", default=None, help="분석 캐시 위치 (기본 ~/.autocut/cache)")
         sp.add_argument("--no-recursive", action="store_true", help="하위 폴더 제외")
+        sp.add_argument("--config", default=None, help="설정 파일 (기본 ~/.autocut/config.toml)")
+
+    def target(sp):
+        sp.add_argument("--target", default="current", choices=["current", *OS_NAMES, "all"],
+                        help="XML을 열 OS. all이면 .mac.xml / .win.xml 둘 다")
 
     def asr(sp):
-        sp.add_argument("--backend", default="faster-whisper", choices=["faster-whisper", "whisperx"])
+        sp.add_argument("--backend", default="auto", choices=["auto", "faster-whisper", "whisperx", "mlx-whisper"],
+                        help="auto: 애플 실리콘 맥이면 mlx-whisper, 아니면 faster-whisper")
         sp.add_argument("--model", default="large-v3")
         sp.add_argument("--language", default="ko")
         sp.add_argument("--device", default="auto", help="auto / cuda / cpu")
         sp.add_argument("--diarize", action="store_true", help="화자 분리 (whisperx + HF_TOKEN)")
+        sp.add_argument("--force-asr", action="store_true", help="캐시 무시하고 음성인식 다시")
 
     sp = sub.add_parser("probe", help="메타데이터 확인")
     common(sp)
@@ -153,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-o", "--output", default="autocut_smoke.xml")
     sp.add_argument("--name", default=None)
     sp.add_argument("--piece", type=float, default=3.0, help="조각 길이(초)")
+    target(sp)
     sp.set_defaults(func=cmd_smoke)
 
     sp = sub.add_parser("analyze", help="수집 + 음성인식")
@@ -170,7 +231,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--pad-after", type=float, default=0.25)
     sp.add_argument("--audio-tracks", type=int, default=2, help="최대 오디오 트랙(채널) 수")
     sp.add_argument("--no-markers", action="store_true")
+    target(sp)
     sp.set_defaults(func=cmd_cut)
+
+    sp = sub.add_parser("relink", help="XML 원본 경로를 맥/윈도우용으로 변환")
+    sp.add_argument("input")
+    sp.add_argument("-o", "--output", default=None)
+    sp.add_argument("--config", default=None)
+    sp.add_argument("--target", default="current", choices=["current", *OS_NAMES])
+    sp.set_defaults(func=cmd_relink)
 
     for name in ("reference", "learn"):
         sp = sub.add_parser(name, help="(예정)")
@@ -180,6 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # 윈도우 콘솔(cp949)에서 한글 외 문자가 섞인 파일명 출력 시 죽지 않게
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     args.func(args)
 

@@ -10,31 +10,14 @@
 
 from __future__ import annotations
 
-import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 from autocut.models import Cut, MediaInfo, Marker
+from autocut.paths import PathMap, current_os, existing_variant, nfc, path_to_url
 from autocut.timecode import Rate, is_drop_frame, timecode_to_frames
-
-_WIN_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
-
-
-def path_to_url(path: str) -> str:
-    """로컬 경로 -> Premiere가 읽는 pathurl. 윈도우/UNC/맥 모두 처리."""
-    if _WIN_DRIVE.match(path):
-        p = path.replace("\\", "/")
-        return "file://localhost/" + quote(p, safe="/")
-    if path.startswith("\\\\"):  # \\server\share\...
-        p = path[2:].replace("\\", "/")
-        host, _, rest = p.partition("/")
-        return f"file://{host}/" + quote(rest, safe="/")
-    p = path if path.startswith("/") else str(Path(path).resolve())
-    return "file://localhost" + quote(p, safe="/")
-
 
 def _sub(parent: ET.Element, tag: str, text: object | None = None) -> ET.Element:
     el = ET.SubElement(parent, tag)
@@ -75,6 +58,8 @@ class ExportOptions:
     rate: Rate | None = None  # None이면 첫 비디오 소스 기준
     width: int | None = None
     height: int | None = None
+    target_os: str | None = None  # None = 지금 쓰는 OS. 다른 OS면 path_map으로 변환
+    path_map: PathMap = field(default_factory=PathMap)
 
 
 @dataclass
@@ -154,6 +139,17 @@ def build_xmeml(cuts: list[Cut], opt: ExportOptions | None = None) -> ET.Element
             a_index[ch][aid] = len(a_index[ch]) + 1
 
     defined: set[str] = set()
+    target = opt.target_os or current_os()
+    unmapped: set[str] = set()
+
+    def target_path(p: str) -> str:
+        if target == current_os():
+            return p
+        out = opt.path_map.convert(p, target)
+        if out is None:
+            unmapped.add(p)
+            return p
+        return nfc(out)
 
     def file_el(parent: ET.Element, m: MediaInfo) -> None:
         fid = file_ids[m.path]
@@ -163,7 +159,7 @@ def build_xmeml(cuts: list[Cut], opt: ExportOptions | None = None) -> ET.Element
             return
         defined.add(fid)
         _sub(f, "name", m.name)
-        _sub(f, "pathurl", path_to_url(m.path))
+        _sub(f, "pathurl", path_to_url(target_path(m.path)))
         src_rate = Rate.from_fps(m.fps_num, m.fps_den) if m.has_video and m.fps_num else rate
         _rate(f, src_rate)
         _sub(f, "duration", src_rate.to_frames(m.duration))
@@ -277,12 +273,17 @@ def build_xmeml(cuts: list[Cut], opt: ExportOptions | None = None) -> ET.Element
     for mk in opt.sequence_markers:
         _marker(seq, mk, rate)
 
+    if unmapped:
+        warnings.warn(
+            f"{target} 경로로 바꾸지 못한 파일 {len(unmapped)}개 (config.toml [roots] 확인): "
+            + ", ".join(sorted(unmapped)[:3]),
+            stacklevel=2,
+        )
     ET.indent(root, space="  ")
     return ET.ElementTree(root)
 
 
-def write_xmeml(cuts: list[Cut], out_path: str | Path, opt: ExportOptions | None = None) -> Path:
-    tree = build_xmeml(cuts, opt)
+def write_tree(tree: ET.ElementTree, out_path: str | Path) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     body = ET.tostring(tree.getroot(), encoding="unicode")
@@ -291,3 +292,39 @@ def write_xmeml(cuts: list[Cut], out_path: str | Path, opt: ExportOptions | None
         encoding="utf-8",
     )
     return out_path
+
+
+def write_xmeml(cuts: list[Cut], out_path: str | Path, opt: ExportOptions | None = None) -> Path:
+    return write_tree(build_xmeml(cuts, opt), out_path)
+
+
+def relink_xml(in_path: str | Path, out_path: str | Path, path_map: PathMap,
+               target_os: str | None = None) -> dict[str, int]:
+    """기존 XML(AutoCut이 만든 것이든 프리미어에서 내보낸 것이든)의 원본 경로를 다른 OS용으로.
+    target이 지금 OS면 실제 파일 존재 여부도 확인하고 NFC/NFD 차이를 보정한다."""
+    from autocut.paths import url_to_path
+
+    target = target_os or current_os()
+    tree = ET.parse(in_path)
+    stats = {"total": 0, "changed": 0, "unmapped": 0, "missing": 0}
+    for el in tree.getroot().iter("pathurl"):
+        if not el.text:
+            continue
+        stats["total"] += 1
+        old = url_to_path(el.text.strip())
+        new = path_map.convert(old, target)
+        if new is None:
+            stats["unmapped"] += 1
+            new = old
+        if target == current_os():
+            found = existing_variant(new)
+            if found is None:
+                stats["missing"] += 1
+            else:
+                new = found
+        url = path_to_url(new)
+        if url != el.text.strip():
+            stats["changed"] += 1
+            el.text = url
+    write_tree(tree, out_path)
+    return stats
