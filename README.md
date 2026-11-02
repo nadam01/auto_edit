@@ -25,6 +25,10 @@ pip install -e ".[whisper,cuda,dev]"  # cuda: CUDA 12 cuBLAS + cuDNN 9를 pip로
 ```
 NVIDIA 드라이버만 최신이면 GPU를 자동으로 사용한다(`nvidia-smi`로 드라이버 확인).
 
+> **"애플리케이션 제어 정책에서 이 파일을 차단했습니다"** 가 나오면 (윈도우 스마트 앱 컨트롤)
+> `pip` 대신 `python -m pip`, `autocut` 대신 `python -m autocut` 으로 실행한다. 기능은 같다.
+> 원본 폴더·가상환경은 OneDrive(바탕 화면, 문서) 밖, 예: `C:\dev\auto_edit` 에 둔다.
+
 **설치 후 컴퓨터마다 한 번**
 ```bash
 autocut doctor
