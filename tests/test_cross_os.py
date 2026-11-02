@@ -192,3 +192,19 @@ def test_mlx_backend_parsing(monkeypatch):
     assert be.resolve_auto() == "mlx-whisper"
     monkeypatch.setattr(be, "is_apple_silicon", lambda: False)
     assert be.resolve_auto() == "faster-whisper"
+
+
+def test_doctor_runs(tmp_path, capsys):
+    from autocut import doctor
+
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(f'cache_dir = "{tmp_path / "cache"}"\n[roots.x]\nmac = "/nonexistent"\n', encoding="utf-8")
+    rows = doctor.run(str(cfg))
+    items = {r[1]: r for r in rows}
+    assert items["ffprobe"][0] == doctor.OK
+    assert items["캐시 폴더"][0] == doctor.OK
+    assert any("둘 다" in r[2] for r in rows)
+
+
+def test_nvidia_dll_noop_off_windows():
+    assert be.add_nvidia_dll_dirs() == [] or sys.platform.startswith("win")

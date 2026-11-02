@@ -21,8 +21,18 @@ pip install -e ".[whisper,mlx,dev]"   # 애플 실리콘이면 mlx-whisper(GPU)�
 winget install Gyan.FFmpeg Python.Python.3.12
 ```
 ```powershell
-pip install -e ".[whisper,dev]"       # NVIDIA GPU면 CUDA 12 + cuDNN 9 설치 시 자동 사용
+pip install -e ".[whisper,cuda,dev]"  # cuda: CUDA 12 cuBLAS + cuDNN 9를 pip로 설치 (Toolkit 불필요)
 ```
+NVIDIA 드라이버만 최신이면 GPU를 자동으로 사용한다(`nvidia-smi`로 드라이버 확인).
+
+**설치 후 컴퓨터마다 한 번**
+```bash
+autocut doctor
+```
+ffmpeg, GPU 사용 여부, 선택된 음성인식 백엔드, config.toml 루트(드라이브 연결), 캐시 폴더를 점검한다.
+
+**권장 분담**: 긴 촬영본 음성인식은 윈도우(NVIDIA GPU)에서, 캐시를 외장 드라이브에 두면
+맥에서는 다시 분석하지 않고 바로 `cut`/`relink`만 하면 된다. 맥(애플 실리콘)도 mlx-whisper로 충분히 빠르다.
 
 화자 분리가 필요하면 `.[whisperx]`도 추가(HF_TOKEN 필요).
 
@@ -106,7 +116,8 @@ windows = "E:/.autocut_cache"
 ## 구조
 ```
 autocut/
-  cli.py            probe / smoke / analyze / cut / relink  (reference / learn 예정)
+  cli.py            doctor / probe / smoke / analyze / cut / relink  (reference / learn 예정)
+  doctor.py         설치 상태 점검
   paths.py          맥↔윈도우 경로 변환, config.toml, pathurl
   models.py         MediaInfo, Transcript, Cut, Marker
   timecode.py       NTSC 레이트, 드롭프레임 TC

@@ -1,5 +1,6 @@
 """autocut 명령줄.
 
+  autocut doctor                       설치 상태 점검 (컴퓨터마다 처음 한 번)
   autocut probe   SRC                  메타데이터만 확인
   autocut smoke   SRC -o smoke.xml     음성인식 없이 XML 연결 테스트 (프리미어 호환 확인용)
   autocut analyze SRC                  수집 + 음성인식 (캐시)
@@ -177,6 +178,12 @@ def cmd_relink(args) -> None:
         _log("  [경고] 일부 원본을 찾지 못했습니다. 드라이브 연결과 config.toml [roots]를 확인하세요.")
 
 
+def cmd_doctor(args) -> None:
+    from autocut import doctor
+
+    raise SystemExit(doctor.main(args.config))
+
+
 def cmd_todo(args) -> None:
     raise SystemExit(f"'{args.cmd}'는 아직 구현 전입니다 (PROJECT_SPEC 개발 순서 5~6단계).")
 
@@ -203,6 +210,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--device", default="auto", help="auto / cuda / cpu")
         sp.add_argument("--diarize", action="store_true", help="화자 분리 (whisperx + HF_TOKEN)")
         sp.add_argument("--force-asr", action="store_true", help="캐시 무시하고 음성인식 다시")
+
+    sp = sub.add_parser("doctor", help="설치 상태 점검 (ffmpeg, GPU, 설정)")
+    sp.add_argument("--config", default=None)
+    sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("probe", help="메타데이터 확인")
     common(sp)

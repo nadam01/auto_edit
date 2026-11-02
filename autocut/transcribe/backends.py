@@ -34,6 +34,40 @@ class BackendUnavailable(RuntimeError):
     pass
 
 
+def add_nvidia_dll_dirs() -> list[str]:
+    """윈도우: pip로 설치한 nvidia-cublas/cudnn DLL을 찾을 수 있게 등록.
+    (faster-whisper의 ctranslate2는 CUDA 12 cuBLAS + cuDNN 9 DLL이 PATH에 있어야 GPU를 쓴다)"""
+    if not sys.platform.startswith("win"):
+        return []
+    added = []
+    try:
+        import nvidia  # type: ignore  # namespace package
+    except ImportError:
+        return []
+    from pathlib import Path
+
+    for base in getattr(nvidia, "__path__", []):
+        for bin_dir in Path(base).glob("*/bin"):
+            d = str(bin_dir)
+            try:
+                os.add_dll_directory(d)
+            except (OSError, AttributeError):
+                continue
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            added.append(d)
+    return added
+
+
+def cuda_device_count() -> int:
+    add_nvidia_dll_dirs()
+    try:
+        import ctranslate2  # type: ignore
+
+        return ctranslate2.get_cuda_device_count()
+    except Exception:
+        return 0
+
+
 def _auto_device() -> str:
     try:
         import torch  # type: ignore
@@ -42,14 +76,7 @@ def _auto_device() -> str:
             return "cuda"
     except ImportError:
         pass
-    try:
-        import ctranslate2  # type: ignore
-
-        if ctranslate2.get_cuda_device_count() > 0:
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
+    return "cuda" if cuda_device_count() > 0 else "cpu"
 
 
 @dataclass
